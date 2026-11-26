@@ -1,4 +1,17 @@
-version: '3.8'
+x-backend-environment: &backend-environment
+  DATABASE_URL: postgresql://${DATABASE_USER:-itsm_user}:${DATABASE_PASSWORD:?Set DATABASE_PASSWORD in .env}@db:5432/${DATABASE_NAME:-itsm_platform}
+  DATABASE_USER: ${DATABASE_USER:-itsm_user}
+  DATABASE_PASSWORD: ${DATABASE_PASSWORD:?Set DATABASE_PASSWORD in .env}
+  REDIS_URL: redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}@redis:6379/0
+  JWT_SECRET_KEY: ${JWT_SECRET_KEY:?Set JWT_SECRET_KEY in .env}
+  DEBUG: ${DEBUG:-false}
+  ENVIRONMENT: ${ENVIRONMENT:-production}
+  CELERY_BROKER_URL: redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}@redis:6379/1
+  CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}@redis:6379/2
+
+x-backend-build: &backend-build
+  context: .
+  dockerfile: Dockerfile
 
 services:
   # PostgreSQL Database
@@ -8,7 +21,7 @@ services:
     environment:
       POSTGRES_DB: ${DATABASE_NAME:-itsm_platform}
       POSTGRES_USER: ${DATABASE_USER:-itsm_user}
-      POSTGRES_PASSWORD: ${DATABASE_PASSWORD}
+      POSTGRES_PASSWORD: ${DATABASE_PASSWORD:?Set DATABASE_PASSWORD in .env}
       PGDATA: /var/lib/postgresql/data/pgdata
     volumes:
       - postgres_data:/var/lib/postgresql/data
@@ -27,13 +40,15 @@ services:
   redis:
     image: redis:7-alpine
     container_name: itsm_redis
-    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-}
+    command: ["sh", "-c", "exec redis-server --appendonly yes --requirepass \"$$REDIS_PASSWORD\""]
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}
     ports:
       - "${REDIS_PORT:-6379}:6379"
     volumes:
       - redis_data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" ping | grep -q PONG"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -44,17 +59,9 @@ services:
   # FastAPI Backend
   backend:
     build:
-      context: .
-      dockerfile: Dockerfile
+      <<: *backend-build
     container_name: itsm_backend
-    environment:
-      - DATABASE_URL=postgresql://${DATABASE_USER:-itsm_user}:${DATABASE_PASSWORD}@db:5432/${DATABASE_NAME:-itsm_platform}
-      - REDIS_URL=redis://:${REDIS_PASSWORD:-}@redis:6379/0
-      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
-      - DEBUG=${DEBUG:-false}
-      - ENVIRONMENT=${ENVIRONMENT:-production}
-      - CELERY_BROKER_URL=redis://:${REDIS_PASSWORD:-}@redis:6379/1
-      - CELERY_RESULT_BACKEND=redis://:${REDIS_PASSWORD:-}@redis:6379/2
+    environment: *backend-environment
     ports:
       - "8000:8000"
     depends_on:
@@ -72,18 +79,16 @@ services:
   # Celery Worker
   celery_worker:
     build:
-      context: .
-      dockerfile: Dockerfile
+      <<: *backend-build
     container_name: itsm_celery_worker
-    environment:
-      - DATABASE_URL=postgresql://${DATABASE_USER:-itsm_user}:${DATABASE_PASSWORD}@db:5432/${DATABASE_NAME:-itsm_platform}
-      - REDIS_URL=redis://:${REDIS_PASSWORD:-}@redis:6379/0
-      - CELERY_BROKER_URL=redis://:${REDIS_PASSWORD:-}@redis:6379/1
-      - CELERY_RESULT_BACKEND=redis://:${REDIS_PASSWORD:-}@redis:6379/2
+    environment: *backend-environment
     depends_on:
-      - db
-      - redis
-      - backend
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
     volumes:
       - ./logs:/app/logs
     networks:
@@ -94,18 +99,16 @@ services:
   # Celery Beat (Scheduler)
   celery_beat:
     build:
-      context: .
-      dockerfile: Dockerfile
+      <<: *backend-build
     container_name: itsm_celery_beat
-    environment:
-      - DATABASE_URL=postgresql://${DATABASE_USER:-itsm_user}:${DATABASE_PASSWORD}@db:5432/${DATABASE_NAME:-itsm_platform}
-      - REDIS_URL=redis://:${REDIS_PASSWORD:-}@redis:6379/0
-      - CELERY_BROKER_URL=redis://:${REDIS_PASSWORD:-}@redis:6379/1
-      - CELERY_RESULT_BACKEND=redis://:${REDIS_PASSWORD:-}@redis:6379/2
+    environment: *backend-environment
     depends_on:
-      - db
-      - redis
-      - backend
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
     volumes:
       - ./logs:/app/logs
     networks:
@@ -116,21 +119,35 @@ services:
   # Flower (Celery Monitoring)
   flower:
     build:
-      context: .
-      dockerfile: Dockerfile
+      <<: *backend-build
     container_name: itsm_flower
-    environment:
-      - CELERY_BROKER_URL=redis://:${REDIS_PASSWORD:-}@redis:6379/1
-      - CELERY_RESULT_BACKEND=redis://:${REDIS_PASSWORD:-}@redis:6379/2
+    environment: *backend-environment
     ports:
       - "5555:5555"
     depends_on:
-      - redis
-      - celery_worker
+      redis:
+        condition: service_healthy
+      celery_worker:
+        condition: service_started
     networks:
       - itsm_network
     restart: unless-stopped
     command: celery -A app.core.celery_app flower --port=5555
+
+  test:
+    build:
+      <<: *backend-build
+    environment: *backend-environment
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - itsm_network
+    profiles:
+      - test
+    command: ["pytest"]
 
 volumes:
   postgres_data:

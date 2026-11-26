@@ -61,15 +61,28 @@ Automatically added to all responses:
 ### Option 1: Docker Compose (Recommended)
 
 ```bash
-# Build and start services
-docker-compose up -d
+# Configure local Compose secrets (the file is gitignored)
+cp .env.example .env
+# Edit .env and set strong DATABASE_PASSWORD, REDIS_PASSWORD, and JWT_SECRET_KEY values.
+
+# Build and run the pytest suite in a one-off container
+docker compose --profile test build test
+docker compose --profile test run --rm test
+
+# Build and start the API, database, Redis, and Celery services
+docker compose up -d --build
 
 # View logs
-docker-compose logs -f backend
+docker compose logs -f backend
+
+# Check the API health endpoint
+curl http://localhost:8000/health
 
 # Stop services
-docker-compose down
+docker compose down
 ```
+
+The Compose project is defined in `docker-compose.yml` in the backend folder. It does not build the separate frontend folder. The `test` service uses the backend image, runs `pytest`, and starts only its PostgreSQL and Redis dependencies. The tests use an in-memory SQLite database for individual test fixtures; the PostgreSQL dependency is used by the app startup lifecycle.
 
 ### Option 2: Manual Deployment
 
